@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
+
 
 import sqlalchemy
+from copy import copy
+from textwrap import dedent
 from singer_sdk.connectors.sql import SQLConnector
 from singer_sdk.helpers._conformers import replace_leading_digit
 from singer_sdk.sinks.sql import SQLSink
 from sqlalchemy import Column
+from sqlalchemy.sql import Executable
 
 from target_mssql.connector import mssqlConnector
 
@@ -229,12 +233,12 @@ class mssqlSink(SQLSink):
         # issue here https://github.com/MeltanoLabs/target-postgres/issues/22
 
         join_condition = " and ".join(
-            [f"temp.{key} = target.{key}" for key in join_keys]
+            [f"temp.{self.quote_reserved(key)} = target.{self.quote_reserved(key)}" for key in join_keys]
         )
 
         update_stmt = ", ".join(
             [
-                f"target.{key} = temp.{key}"
+                f"target.{self.quote_reserved(key)} = temp.{self.quote_reserved(key)}"
                 for key in schema["properties"].keys()
                 if key not in join_keys
             ]
@@ -248,12 +252,36 @@ class mssqlSink(SQLSink):
                 UPDATE SET
                     { update_stmt }
             WHEN NOT MATCHED THEN
-                INSERT ({", ".join(schema["properties"].keys())})
-                VALUES ({", ".join([f"temp.{key}" for key in schema["properties"].keys()])});
+                INSERT ({", ".join([self.quote_reserved(name) for name in schema["properties"].keys()])})
+                VALUES ({", ".join([f"temp.{self.quote_reserved(key)}" for key in schema["properties"].keys()])});
         """  # nosec
 
         with self.connection.begin():
             self.connection.execute(merge_sql)
+
+    def generate_insert_statement(
+        self,
+        full_table_name: str,
+        schema: dict,
+    ) -> Union[str, Executable]:
+        """Generate an insert statement for the given records.
+
+        Args:
+            full_table_name: the target table name.
+            schema: the JSON schema for the new table.
+
+        Returns:
+            An insert statement.
+        """
+        property_names = list(self.conform_schema(schema)["properties"].keys())
+        statement = dedent(
+            f"""\
+            INSERT INTO {full_table_name}
+            ({", ".join([self.quote_reserved(name) for name in property_names])})
+            VALUES ({", ".join([f":{name}" for name in property_names])})
+            """
+        )
+        return statement.rstrip()
 
     def parse_full_table_name(
         self, full_table_name: str
@@ -290,7 +318,7 @@ class mssqlSink(SQLSink):
         name = re.sub("([a-z0-9])([A-Z])", r"\1_\2", name)
         return name.lower()
 
-    def conform_name(self, name: str, object_type: Optional[str] = None) -> str:
+    def conform_name(self, name: str, object_type: Optional[str] = None, quote_reserved: bool = False) -> str:
         """Conform a stream property name to one suitable for the target system.
         Transforms names to snake case by default, applicable to most common DBMSs'.
         Developers may override this method to apply custom transformations
@@ -298,6 +326,7 @@ class mssqlSink(SQLSink):
         Args:
             name: Property name.
             object_type: One of ``database``, ``schema``, ``table`` or ``column``.
+            quote_reserved: Whether to quote reserved words.
         Returns:
             The name transformed to snake case.
         """
@@ -307,3 +336,38 @@ class mssqlSink(SQLSink):
         name = self.snakecase(name)
         # replace leading digit
         return replace_leading_digit(name)
+
+    def quote_reserved(self, name: str) -> str:
+        """Quote a name if it is a reserved word.
+        Args:
+            name: Name to quote.
+        Returns:
+            The name, possibly quoted.
+        """
+
+        # add double quotes to reserved words
+        reserved_words = [
+            'add', 'external', 'procedure', 'all', 'fetch', 'public', 'alter', 'file', 'raiserror', 'and', 'fillfactor',
+            'read', 'any', 'for', 'readtext', 'as', 'foreign', 'reconfigure', 'asc', 'freetext', 'references',
+            'authorization', 'freetexttable', 'replication', 'backup', 'from', 'restore', 'begin', 'full', 'restrict',
+            'between', 'function', 'return', 'break', 'goto', 'revert', 'browse', 'grant', 'revoke', 'bulk', 'group',
+            'right', 'by', 'having', 'rollback', 'cascade', 'holdlock', 'rowcount', 'case', 'identity', 'rowguidcol',
+            'check', 'identity_insert', 'rule', 'checkpoint', 'identitycol', 'save', 'close', 'if', 'schema', 'clustered',
+            'in', 'securityaudit', 'coalesce', 'index', 'select', 'collate', 'inner', 'semantickeyphrasetable', 'column',
+            'insert', 'semanticsimilaritydetailstable', 'commit', 'into', 'session_user', 'constraint', 'is', 'set',
+            'contains', 'join', 'setuser', 'containstable', 'key', 'shutdown', 'continue', 'kill', 'some', 'convert',
+            'left', 'statistics', 'create', 'like', 'system_user', 'cross', 'lineno', 'table', 'current', 'load',
+            'tablesample', 'current_date', 'merge', 'textsize', 'current_time', 'national', 'then', 'current_timestamp',
+            'nocheck', 'to', 'current_user', 'nonclustered', 'top', 'cursor', 'not', 'tran', 'database', 'null',
+            'transaction', 'dbcc', 'nullif', 'trigger', 'deallocate', 'of', 'truncate', 'declare', 'off', 'try_convert',
+            'default', 'offsets', 'tsequal', 'delete', 'on', 'union', 'deny', 'open', 'unique', 'desc', 'opendatasource',
+            'unpivot', 'disk', 'openquery', 'update', 'distinct', 'openrowset', 'updatetext', 'distributed', 'openxml',
+            'use', 'double', 'option', 'user', 'drop', 'or', 'values', 'dump', 'order', 'varying', 'else', 'outer',
+            'view', 'end', 'over', 'waitfor', 'errlvl', 'percent', 'when', 'escape', 'pivot', 'where', 'except', 'plan',
+            'while', 'exec', 'precision', 'with', 'execute', 'primary', 'within group', 'exists', 'print', 'writetext',
+            'exit', 'proc'
+        ]
+        if name in reserved_words:
+            name = f'\"{name}\"'
+
+        return name
