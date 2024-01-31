@@ -144,3 +144,8 @@ poetry.lock
 .dccache
 _jottings.py
 .security-notes.json
+
+pymssql-2.2.11-cp311-cp311-macosx_10_9_universal2.whl
+static_stream.jsonl
+test_records.jsonl
+test_records_sales_lines.jsonl
